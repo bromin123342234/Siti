@@ -402,8 +402,8 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =================== ЗАПУСК БОТА ===================
 def main():
     """Запуск бота"""
-    # ТОКЕН ТВОЕГО БОТА (замени на свой)
-    TOKEN = "YOUR_BOT_TOKEN_HERE"
+    # ТОКЕН (уже вставлен)
+    TOKEN = "8496961011:AAFKx16Piynk6bsyxF_ibUJlOPi3d_ndvGw"
     
     # Создаем приложение
     app = Application.builder().token(TOKEN).build()
@@ -415,8 +415,22 @@ def main():
     app.add_handler(CallbackQueryHandler(button_callback))
     
     # Запускаем бота
-    print("🚀 Бот запущен! Иди в Telegram и напиши /start")
-    app.run_polling()
+    print("=" * 50)
+    print("🚀 БОТ ЗАПУЩЕН!")
+    print("=" * 50)
+    print("👉 Иди в Telegram и найди своего бота")
+    print("👉 Напиши боту /start")
+    print("=" * 50)
+    print("Если есть ошибки - покажи мне что пишет здесь")
+    
+    try:
+        app.run_polling()
+    except Exception as e:
+        print(f"❌ ОШИБКА: {e}")
+        print("Возможные причины:")
+        print("1. Неправильный токен")
+        print("2. Нет интернета")
+        print("3. Библиотека не установлена")
 
 if __name__ == "__main__":
     main()
