@@ -1,461 +1,384 @@
 import logging
 import random
-from datetime import datetime
-from enum import Enum
-from typing import Dict, Tuple
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-)
+import json
+from datetime import datetime, timedelta
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # Настройка логирования
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
-logger = logging.getLogger(__name__)
 
-# Типы ресурсов
-class ResourceType(Enum):
-    WHEAT = "🌾 Пшеница"
-    WOOD = "🪵 Дерево"
-    STONE = "⛰️ Камень"
+# Хранение данных игроков
+players_data = {}
 
-# Типы зданий
-class BuildingType(Enum):
-    WHEAT_FARM = "🌾 Ферма пшеницы"
-    TREE_FARM = "🌳 Ферма деревьев"
-    MINE = "⛏️ Шахта"
-    HOUSE = "🏠 Дом"
-
-# Класс здания
-class Building:
-    def __init__(self, building_type: BuildingType, level: int = 1):
-        self.type = building_type
-        self.level = level
-        self.last_production_time = datetime.now()
-    
-    def get_production_rate(self) -> Dict[ResourceType, float]:
-        """Возвращает количество ресурсов в час"""
-        rates = {
-            BuildingType.WHEAT_FARM: {ResourceType.WHEAT: 20 * self.level},
-            BuildingType.TREE_FARM: {ResourceType.WOOD: 15 * self.level},
-            BuildingType.MINE: {ResourceType.STONE: 10 * self.level},
-        }
-        return rates.get(self.type, {})
-    
-    def upgrade_cost(self) -> Dict[ResourceType, int]:
-        """Стоимость улучшения"""
-        return {
-            ResourceType.WOOD: 100 * self.level,
-            ResourceType.STONE: 50 * self.level,
-        }
-
-# Класс города
-class Town:
-    def __init__(self, name: str):
-        self.name = name
+class GameState:
+    def __init__(self, player_id):
+        self.player_id = player_id
         self.resources = {
-            ResourceType.WHEAT: 500,
-            ResourceType.WOOD: 300,
-            ResourceType.STONE: 200,
+            'wheat': 100,  # Пшеница
+            'wood': 50,    # Дерево
+            'stone': 30,   # Камень
+            'gold': 0      # Золото
         }
-        self.buildings = []
-        self.population = 3
-        self.max_population = 5
+        self.buildings = {
+            'wheat_farm': 0,  # Ферма пшеницы
+            'wood_farm': 0,   # Ферма деревьев
+            'stone_mine': 0,  # Шахта камня
+            'houses': 1       # Дома
+        }
+        self.population = 1   # Население
         self.last_update = datetime.now()
         self.day = 1
-        self.happiness = 100
-        
-        # Стартовые постройки
-        self.buildings.append(Building(BuildingType.WHEAT_FARM))
-        self.buildings.append(Building(BuildingType.TREE_FARM))
-        self.buildings.append(Building(BuildingType.HOUSE))
-    
-    def update_resources(self):
-        """Обновление ресурсов на основе времени"""
-        now = datetime.now()
-        hours_passed = (now - self.last_update).total_seconds() / 3600
-        
-        if hours_passed > 0:
-            # Производство ресурсов
-            for building in self.buildings:
-                production = building.get_production_rate()
-                for resource, rate in production.items():
-                    produced = rate * hours_passed
-                    self.resources[resource] = max(0, self.resources.get(resource, 0) + produced)
-            
-            # Потребление пшеницы
-            wheat_consumed = self.population * 10 * (hours_passed / 24)
-            self.resources[ResourceType.WHEAT] = max(0, self.resources[ResourceType.WHEAT] - wheat_consumed)
-            
-            # Проверка голода
-            if self.resources[ResourceType.WHEAT] <= 0:
-                starvation = min(self.population, random.randint(1, 3))
-                self.population = max(0, self.population - starvation)
-                self.happiness = max(0, self.happiness - 20)
-            
-            # Случайное прибытие жителей
-            if self.population < self.max_population:
-                arrival_chance = 0.05 * hours_passed
-                if random.random() < arrival_chance:
-                    new_residents = random.randint(1, 2)
-                    self.population = min(self.max_population, self.population + new_residents)
-            
-            self.last_update = now
-    
-    def can_build_house(self) -> Tuple[bool, str]:
-        """Проверка возможности постройки дома"""
-        required = {
-            ResourceType.STONE: 230,
-            ResourceType.WOOD: 400,
-            ResourceType.WHEAT: 100,
-        }
-        
-        for resource, amount in required.items():
-            if self.resources.get(resource, 0) < amount:
-                return False, f"Недостаточно {resource.value}"
-        
-        return True, ""
-    
-    def build_house(self) -> Tuple[bool, str]:
-        """Постройка дома"""
-        can_build, message = self.can_build_house()
-        if not can_build:
-            return False, message
-        
-        # Списание ресурсов
-        self.resources[ResourceType.STONE] -= 230
-        self.resources[ResourceType.WOOD] -= 400
-        self.resources[ResourceType.WHEAT] -= 100
-        
-        # Добавление здания
-        self.buildings.append(Building(BuildingType.HOUSE))
-        self.max_population += 5
-        self.happiness = min(100, self.happiness + 10)
-        
-        return True, "Дом успешно построен!"
-    
-    def can_build_building(self, building_type: BuildingType) -> Tuple[bool, str]:
-        """Проверка возможности постройки здания"""
-        costs = {
-            BuildingType.WHEAT_FARM: {
-                ResourceType.WOOD: 100,
-                ResourceType.STONE: 50,
-            },
-            BuildingType.TREE_FARM: {
-                ResourceType.WOOD: 50,
-                ResourceType.STONE: 100,
-            },
-            BuildingType.MINE: {
-                ResourceType.WOOD: 150,
-                ResourceType.STONE: 50,
-            },
-        }
-        
-        if building_type not in costs:
-            return False, "Неизвестный тип здания"
-        
-        cost = costs[building_type]
-        for resource, amount in cost.items():
-            if self.resources.get(resource, 0) < amount:
-                return False, f"Недостаточно {resource.value}"
-        
-        return True, ""
-    
-    def build_building(self, building_type: BuildingType) -> Tuple[bool, str]:
-        """Постройка производственного здания"""
-        can_build, message = self.can_build_building(building_type)
-        if not can_build:
-            return False, message
-        
-        # Списание ресурсов
-        costs = {
-            BuildingType.WHEAT_FARM: {
-                ResourceType.WOOD: 100,
-                ResourceType.STONE: 50,
-            },
-            BuildingType.TREE_FARM: {
-                ResourceType.WOOD: 50,
-                ResourceType.STONE: 100,
-            },
-            BuildingType.MINE: {
-                ResourceType.WOOD: 150,
-                ResourceType.STONE: 50,
-            },
-        }
-        
-        cost = costs[building_type]
-        for resource, amount in cost.items():
-            self.resources[resource] -= amount
-        
-        # Добавление здания
-        self.buildings.append(Building(building_type))
-        self.happiness = min(100, self.happiness + 5)
-        
-        return True, f"{building_type.value} построена!"
-    
-    def get_status_text(self) -> str:
-        """Получение текста статуса города"""
-        self.update_resources()
-        
-        # Подсчет зданий
-        building_counts = {}
-        for building in self.buildings:
-            count = building_counts.get(building.type.value, 0)
-            building_counts[building.type.value] = count + 1
-        
-        buildings_text = ""
-        for building_name, count in building_counts.items():
-            buildings_text += f"  {building_name}: {count}\n"
-        
-        status = (
-            f"🏙️ *{self.name}*\n"
-            f"📅 День: {self.day}\n"
-            f"😊 Настроение: {self.happiness}/100\n\n"
-            
-            f"👥 *Население:* {self.population}/{self.max_population}\n\n"
-            
-            f"📦 *Ресурсы:*\n"
-            f"  {ResourceType.WHEAT.value}: {int(self.resources[ResourceType.WHEAT])}\n"
-            f"  {ResourceType.WOOD.value}: {int(self.resources[ResourceType.WOOD])}\n"
-            f"  {ResourceType.STONE.value}: {int(self.resources[ResourceType.STONE])}\n\n"
-            
-            f"🏗️ *Постройки:*\n{buildings_text}\n"
-            
-            f"⚠️ *Внимание:*\n"
-            f"  Каждый житель потребляет 10 пшеницы в день\n"
-            f"  Дом стоит: 230 камня, 400 дерева, 100 пшеницы\n"
-            f"  Жители приходят случайно"
-        )
-        
-        return status
+        self.taxes_collected = False
 
-# Главный класс игры
-class Game:
-    def __init__(self):
-        self.towns = {}
-    
-    def get_town(self, chat_id: int) -> Town:
-        """Получение или создание города"""
-        if chat_id not in self.towns:
-            town_name = f"Городок_{chat_id % 1000}"
-            self.towns[chat_id] = Town(town_name)
-        
-        town = self.towns[chat_id]
-        town.update_resources()
-        
-        return town
+# Стоимости построек
+BUILDING_COSTS = {
+    'wheat_farm': {'wood': 100, 'stone': 50},
+    'wood_farm': {'wood': 150, 'stone': 80},
+    'stone_mine': {'wood': 200, 'stone': 100},
+    'house': {'wood': 400, 'stone': 230, 'wheat': 100}
+}
 
-# Создаем экземпляр игры
-game = Game()
+# Производство зданий
+BUILDING_PRODUCTION = {
+    'wheat_farm': 50,
+    'wood_farm': 40,
+    'stone_mine': 30
+}
 
-# Обработчики команд
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /start"""
-    chat_id = update.effective_chat.id
-    town = game.get_town(chat_id)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Запуск игры"""
+    player_id = update.effective_user.id
     
-    welcome_text = (
-        "🌄 *Добро пожаловать в Суровый Городок!*\n\n"
-        "Вы — лидер небольшого поселения в суровых землях.\n"
-        "Ваша задача — обеспечить выживание и рост вашего городка.\n\n"
-        "*Основные правила:*\n"
-        "• Каждый житель потребляет 10 пшеницы в день\n"
-        "• Дом стоит: 230 камня, 400 дерева, 100 пшеницы\n"
-        "• Дом увеличивает максимальное население на 5\n"
-        "• Жители приходят случайно\n\n"
-        "Используйте /status чтобы увидеть состояние города."
+    if player_id not in players_data:
+        players_data[player_id] = GameState(player_id)
+    
+    game = players_data[player_id]
+    await update.message.reply_text(
+        f"🏘️ Добро пожаловать в ваш городок!\n"
+        f"День {game.day}\n\n"
+        f"📊 Ресурсы:\n"
+        f"🌾 Пшеница: {game.resources['wheat']}\n"
+        f"🌳 Дерево: {game.resources['wood']}\n"
+        f"🪨 Камень: {game.resources['stone']}\n"
+        f"💰 Золото: {game.resources['gold']}\n\n"
+        f"👥 Население: {game.population}\n"
+        f"🏠 Домов: {game.buildings['houses']}\n\n"
+        f"Используйте /menu для управления городом",
+        parse_mode='Markdown'
     )
-    
+
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Главное меню"""
     keyboard = [
-        [InlineKeyboardButton("📊 Статус", callback_data='status'),
-         InlineKeyboardButton("🏗️ Строить", callback_data='build_menu')]
+        [InlineKeyboardButton("🏗️ Построить здание", callback_data='build')],
+        [InlineKeyboardButton("📊 Статус города", callback_data='status')],
+        [InlineKeyboardButton("⛏️ Собирать ресурсы", callback_data='collect')],
+        [InlineKeyboardButton("🏠 Построить дом", callback_data='build_house')],
+        [InlineKeyboardButton("⏭️ Следующий день", callback_data='next_day')],
     ]
+    
     reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    await update.message.reply_text(welcome_text, parse_mode='Markdown', reply_markup=reply_markup)
+    await update.message.reply_text("🏘️ Меню управления городом:", reply_markup=reply_markup)
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /status"""
-    chat_id = update.effective_chat.id
-    town = game.get_town(chat_id)
-    
-    await show_status(update, context, town)
-
-async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE, town: Town) -> None:
-    """Показать статус города"""
-    status_text = town.get_status_text()
-    
-    keyboard = [
-        [InlineKeyboardButton("🏗️ Строить", callback_data='build_menu'),
-         InlineKeyboardButton("🔄 Обновить", callback_data='status')],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            status_text, 
-            parse_mode='Markdown', 
-            reply_markup=reply_markup
-        )
-    else:
-        await update.message.reply_text(
-            status_text, 
-            parse_mode='Markdown', 
-            reply_markup=reply_markup
-        )
-
-async def build_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /build"""
-    await show_build_menu(update, context)
-
-async def show_build_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Показать меню строительства"""
-    keyboard = [
-        [InlineKeyboardButton("🏠 Дом (230⛰️ 400🪵 100🌾)", callback_data='build_house')],
-        [InlineKeyboardButton("🌾 Ферма пшеницы (50⛰️ 100🪵)", callback_data='build_wheat')],
-        [InlineKeyboardButton("🌳 Ферма деревьев (100⛰️ 50🪵)", callback_data='build_tree')],
-        [InlineKeyboardButton("⛏️ Шахта (50⛰️ 150🪵)", callback_data='build_mine')],
-        [InlineKeyboardButton("🔙 Назад", callback_data='status')]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    menu_text = "🏗️ *Меню строительства*\n\nВыберите что построить:"
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(
-            menu_text, 
-            parse_mode='Markdown', 
-            reply_markup=reply_markup
-        )
-    else:
-        await update.message.reply_text(
-            menu_text, 
-            parse_mode='Markdown', 
-            reply_markup=reply_markup
-        )
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик нажатий на кнопки"""
+async def collect_resources(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Сбор ресурсов"""
     query = update.callback_query
     await query.answer()
     
-    chat_id = update.effective_chat.id
-    town = game.get_town(chat_id)
+    player_id = query.from_user.id
+    game = players_data[player_id]
     
-    if query.data == 'status':
-        await show_status(update, context, town)
+    # Производство от зданий
+    production = {
+        'wheat': game.buildings['wheat_farm'] * BUILDING_PRODUCTION['wheat_farm'],
+        'wood': game.buildings['wood_farm'] * BUILDING_PRODUCTION['wood_farm'],
+        'stone': game.buildings['stone_mine'] * BUILDING_PRODUCTION['stone_mine']
+    }
     
-    elif query.data == 'build_menu':
-        await show_build_menu(update, context)
+    for resource, amount in production.items():
+        game.resources[resource] += amount
     
-    elif query.data == 'build_house':
-        success, message = town.build_house()
+    await query.edit_message_text(
+        f"⛏️ Ресурсы собраны!\n\n"
+        f"🌾 +{production['wheat']} пшеницы\n"
+        f"🌳 +{production['wood']} дерева\n"
+        f"🪨 +{production['stone']} камня\n\n"
+        f"📊 Всего ресурсов:\n"
+        f"🌾 {game.resources['wheat']} | 🌳 {game.resources['wood']} | 🪨 {game.resources['stone']}",
+        parse_mode='Markdown'
+    )
+
+async def show_build_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Меню строительства"""
+    query = update.callback_query
+    await query.answer()
+    
+    player_id = query.from_user.id
+    game = players_data[player_id]
+    
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"🌾 Ферма пшеницы ({BUILDING_COSTS['wheat_farm']['wood']}🌳 {BUILDING_COSTS['wheat_farm']['stone']}🪨)", 
+                callback_data='build_wheat'
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"🌳 Лесопилка ({BUILDING_COSTS['wood_farm']['wood']}🌳 {BUILDING_COSTS['wood_farm']['stone']}🪨)", 
+                callback_data='build_wood'
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                f"⛏️ Шахта ({BUILDING_COSTS['stone_mine']['wood']}🌳 {BUILDING_COSTS['stone_mine']['stone']}🪨)", 
+                callback_data='build_stone'
+            )
+        ],
+        [InlineKeyboardButton("🔙 Назад", callback_data='back_to_menu')],
+    ]
+    
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    await query.edit_message_text(
+        f"🏗️ Выберите здание для строительства:\n"
+        f"Ваши ресурсы: 🌾{game.resources['wheat']} 🌳{game.resources['wood']} 🪨{game.resources['stone']}",
+        reply_markup=reply_markup,
+        parse_mode='Markdown'
+    )
+
+async def build_building(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Строительство здания"""
+    query = update.callback_query
+    await query.answer()
+    
+    player_id = query.from_user.id
+    game = players_data[player_id]
+    
+    building_type = query.data.split('_')[1]  # wheat, wood, stone
+    
+    building_key = f"{building_type}_farm" if building_type != 'stone' else "stone_mine"
+    costs = BUILDING_COSTS[building_key]
+    
+    # Проверка ресурсов
+    if (game.resources['wood'] >= costs['wood'] and 
+        game.resources['stone'] >= costs['stone']):
         
-        if success:
-            result_text = f"✅ {message}\n\n{town.get_status_text()}"
-        else:
-            result_text = f"❌ Не удалось построить дом: {message}\n\n{town.get_status_text()}"
+        # Списание ресурсов
+        game.resources['wood'] -= costs['wood']
+        game.resources['stone'] -= costs['stone']
         
-        keyboard = [
-            [InlineKeyboardButton("🏗️ Строить ещё", callback_data='build_menu'),
-             InlineKeyboardButton("🔙 К статусу", callback_data='status')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Строительство
+        game.buildings[building_key] += 1
         
-        await query.edit_message_text(
-            result_text, 
-            parse_mode='Markdown', 
-            reply_markup=reply_markup
-        )
-    
-    elif query.data in ['build_wheat', 'build_tree', 'build_mine']:
-        building_map = {
-            'build_wheat': BuildingType.WHEAT_FARM,
-            'build_tree': BuildingType.TREE_FARM,
-            'build_mine': BuildingType.MINE
+        building_names = {
+            'wheat': '🌾 Ферму пшеницы',
+            'wood': '🌳 Лесопилку',
+            'stone': '⛏️ Шахту'
         }
         
-        building_type = building_map[query.data]
-        success, message = town.build_building(building_type)
-        
-        if success:
-            result_text = f"✅ {message}\n\n{town.get_status_text()}"
-        else:
-            result_text = f"❌ Не удалось построить {building_type.value.lower()}: {message}\n\n{town.get_status_text()}"
-        
-        keyboard = [
-            [InlineKeyboardButton("🏗️ Строить ещё", callback_data='build_menu'),
-             InlineKeyboardButton("🔙 К статусу", callback_data='status')]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
         await query.edit_message_text(
-            result_text, 
-            parse_mode='Markdown', 
-            reply_markup=reply_markup
+            f"✅ {building_names[building_type]} построена!\n"
+            f"📈 Производство увеличено\n\n"
+            f"Осталось ресурсов:\n"
+            f"🌳 Дерево: {game.resources['wood']}\n"
+            f"🪨 Камень: {game.resources['stone']}",
+            parse_mode='Markdown'
+        )
+    else:
+        await query.edit_message_text(
+            f"❌ Недостаточно ресурсов!\n\n"
+            f"Нужно: 🌳{costs['wood']} 🪨{costs['stone']}\n"
+            f"У вас: 🌳{game.resources['wood']} 🪨{game.resources['stone']}",
+            parse_mode='Markdown'
         )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Обработчик команды /help"""
-    help_text = (
-        "📖 *Список команд:*\n\n"
-        "*/start* - Начать игру\n"
-        "*/status* - Показать статус города\n"
-        "*/build* - Меню строительства\n"
-        "*/help* - Эта справка\n\n"
+async def build_house(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Строительство дома"""
+    query = update.callback_query
+    await query.answer()
+    
+    player_id = query.from_user.id
+    game = players_data[player_id]
+    
+    costs = BUILDING_COSTS['house']
+    
+    # Проверка ресурсов
+    if (game.resources['wood'] >= costs['wood'] and 
+        game.resources['stone'] >= costs['stone'] and
+        game.resources['wheat'] >= costs['wheat']):
         
-        "*Управление:*\n"
-        "Используйте кнопки под сообщениями для управления городом.\n\n"
+        # Списание ресурсов
+        game.resources['wood'] -= costs['wood']
+        game.resources['stone'] -= costs['stone']
+        game.resources['wheat'] -= costs['wheat']
         
-        "*Правила игры:*\n"
-        "• Стройте дома для увеличения населения\n"
-        "• Стройте фермы и шахты для ресурсов\n"
-        "• Следите за запасами пшеницы\n"
-        "• Жители приходят случайно\n"
+        # Строительство дома
+        game.buildings['houses'] += 1
+        
+        await query.edit_message_text(
+            f"🏠 Новый дом построен!\n"
+            f"Теперь можно принять больше жителей.\n\n"
+            f"Осталось ресурсов:\n"
+            f"🌾 Пшеница: {game.resources['wheat']}\n"
+            f"🌳 Дерево: {game.resources['wood']}\n"
+            f"🪨 Камень: {game.resources['stone']}",
+            parse_mode='Markdown'
+        )
+    else:
+        await query.edit_message_text(
+            f"❌ Недостаточно ресурсов для дома!\n\n"
+            f"Нужно: 🌾{costs['wheat']} 🌳{costs['wood']} 🪨{costs['stone']}\n"
+            f"У вас: 🌾{game.resources['wheat']} 🌳{game.resources['wood']} 🪨{game.resources['stone']}",
+            parse_mode='Markdown'
+        )
+
+async def next_day(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Переход к следующему дню"""
+    query = update.callback_query
+    await query.answer()
+    
+    player_id = query.from_user.id
+    game = players_data[player_id]
+    
+    # Расход пшеницы на население
+    food_needed = game.population * 10
+    if game.resources['wheat'] >= food_needed:
+        game.resources['wheat'] -= food_needed
+        starvation = False
+    else:
+        # Голод - умирает часть населения
+        starvation = True
+        deaths = random.randint(1, max(1, game.population // 3))
+        game.population = max(0, game.population - deaths)
+        game.resources['wheat'] = 0
+    
+    # Новые жители (случайно)
+    if game.buildings['houses'] * 5 > game.population:  # В каждом доме может жить до 5 человек
+        new_citizens = random.choices(
+            [0, 1, 2], 
+            weights=[0.3, 0.5, 0.2], 
+            k=1
+        )[0]
+        game.population += new_citizens
+    
+    # Случайные события
+    events = []
+    if random.random() < 0.2:  # 20% шанс события
+        event_type = random.choice(['good', 'bad', 'neutral'])
+        if event_type == 'good':
+            bonus = random.randint(20, 50)
+            resource = random.choice(['wheat', 'wood', 'stone'])
+            game.resources[resource] += bonus
+            events.append(f"🎉 Удача! Нашли {bonus} {resource}")
+        elif event_type == 'bad':
+            loss = random.randint(10, 30)
+            resource = random.choice(['wheat', 'wood', 'stone'])
+            game.resources[resource] = max(0, game.resources[resource] - loss)
+            events.append(f"🌪️ Бедствие! Потеряно {loss} {resource}")
+    
+    game.day += 1
+    
+    # Формируем сообщение
+    message = f"📅 День {game.day}\n\n"
+    
+    if starvation:
+        message += f"⚠️ ГОЛОД! Не хватило еды для всех!\n"
+        message += f"👥 Население уменьшилось до {game.population}\n\n"
+    else:
+        message += f"🍞 Население накормлено (-{food_needed}🌾)\n\n"
+    
+    if events:
+        message += "📰 События дня:\n"
+        for event in events:
+            message += f"• {event}\n"
+        message += "\n"
+    
+    message += (
+        f"📊 Ресурсы:\n"
+        f"🌾 Пшеница: {game.resources['wheat']}\n"
+        f"🌳 Дерево: {game.resources['wood']}\n"
+        f"🪨 Камень: {game.resources['stone']}\n"
+        f"💰 Золото: {game.resources['gold']}\n\n"
+        f"👥 Население: {game.population}\n"
+        f"🏠 Домов: {game.buildings['houses']}\n\n"
+        f"🏭 Производство в день:\n"
+        f"🌾 Фермы: {game.buildings['wheat_farm']} (+{game.buildings['wheat_farm'] * BUILDING_PRODUCTION['wheat_farm']}/день)\n"
+        f"🌳 Лесопилки: {game.buildings['wood_farm']} (+{game.buildings['wood_farm'] * BUILDING_PRODUCTION['wood_farm']}/день)\n"
+        f"⛏️ Шахты: {game.buildings['stone_mine']} (+{game.buildings['stone_mine'] * BUILDING_PRODUCTION['stone_mine']}/день)"
     )
     
-    await update.message.reply_text(help_text, parse_mode='Markdown')
+    await query.edit_message_text(message, parse_mode='Markdown')
 
-async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Команда для отладки (только для разработчиков)"""
-    chat_id = update.effective_chat.id
-    town = game.get_town(chat_id)
+async def show_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показать статус города"""
+    query = update.callback_query
+    await query.answer()
     
-    # Добавляем немного ресурсов для тестирования
-    town.resources[ResourceType.WHEAT] += 100
-    town.resources[ResourceType.WOOD] += 100
-    town.resources[ResourceType.STONE] += 100
+    player_id = query.from_user.id
+    game = players_data[player_id]
     
-    await update.message.reply_text("✅ Ресурсы добавлены! Используйте /status", parse_mode='Markdown')
+    message = (
+        f"🏘️ Статус города\n\n"
+        f"📅 День: {game.day}\n\n"
+        f"📊 Ресурсы:\n"
+        f"🌾 Пшеница: {game.resources['wheat']}\n"
+        f"🌳 Дерево: {game.resources['wood']}\n"
+        f"🪨 Камень: {game.resources['stone']}\n"
+        f"💰 Золото: {game.resources['gold']}\n\n"
+        f"👥 Население: {game.population}\n"
+        f"🍞 Расход еды: {game.population * 10}/день\n\n"
+        f"🏭 Здания:\n"
+        f"🌾 Ферм пшеницы: {game.buildings['wheat_farm']}\n"
+        f"🌳 Лесопилок: {game.buildings['wood_farm']}\n"
+        f"⛏️ Шахт: {game.buildings['stone_mine']}\n"
+        f"🏠 Домов: {game.buildings['houses']}\n\n"
+        f"📈 Максимум жителей: {game.buildings['houses'] * 5}"
+    )
+    
+    await query.edit_message_text(message, parse_mode='Markdown')
 
-def main() -> None:
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка callback запросов"""
+    query = update.callback_query
+    
+    if query.data == 'menu' or query.data == 'back_to_menu':
+        await menu(update, context)
+    elif query.data == 'build':
+        await show_build_menu(update, context)
+    elif query.data == 'status':
+        await show_status(update, context)
+    elif query.data == 'collect':
+        await collect_resources(update, context)
+    elif query.data == 'build_house':
+        await build_house(update, context)
+    elif query.data == 'next_day':
+        await next_day(update, context)
+    elif query.data.startswith('build_'):
+        if query.data in ['build_wheat', 'build_wood', 'build_stone']:
+            await build_building(update, context)
+        else:
+            await show_build_menu(update, context)
+
+def main():
     """Запуск бота"""
-    # Замените 'YOUR_BOT_TOKEN' на токен вашего бота
-    # Получить токен можно у @BotFather в Telegram
-    TOKEN = "YOUR_BOT_TOKEN"
+    # Токен бота (замени на свой)
+    TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
     
     # Создаем приложение
     application = Application.builder().token(TOKEN).build()
     
-    # Регистрируем обработчики команд
+    # Регистрируем обработчики
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("status", status_command))
-    application.add_handler(CommandHandler("build", build_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("debug", debug_command))
-    
-    # Регистрируем обработчик callback-запросов
-    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(CommandHandler("menu", menu))
+    application.add_handler(CallbackQueryHandler(handle_callback))
     
     # Запускаем бота
     print("Бот запущен...")
-    application.run_polling(allowed_updates=Update.ALL_UPDATES)
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
